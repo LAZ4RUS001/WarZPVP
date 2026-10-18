@@ -1,13 +1,101 @@
 --[[
-    Street Hub
+    ========================================================================
+    Street Hub - WarZPVP OPEN BETA
     Integrated for WarZPVP OPEN BETA
-]]
+    Supported: PC, Delta Mobile, Fluxus, Hydrogen, Codex, Arceus X, Solara
+    ========================================================================
+--]]
 
-local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
-local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
-local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+-- 1. Ensure game and LocalPlayer are loaded (Crucial for Delta Mobile, Fluxus, Codex, Arceus X auto-execute)
+if not game:IsLoaded() then
+    pcall(function() game.Loaded:Wait() end)
+end
 
 local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    task.wait(0.1)
+    LocalPlayer = Players.LocalPlayer
+end
+
+-- Universal Safe GUI Parent Resolver (Prioritizes gethui for Mobile/PC, fallback to CoreGui/PlayerGui for Solara)
+local function GetSafeGuiParent()
+    local target = nil
+    if gethui then
+        pcall(function() target = gethui() end)
+    end
+    if not target then
+        pcall(function()
+            local cg = game:GetService("CoreGui")
+            local test = Instance.new("Folder", cg)
+            test:Destroy()
+            target = cg
+        end)
+    end
+    return target or LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- Resilient HttpGet fetcher (Handles Delta Mobile 302 redirects & network retries across all executors)
+local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
+local function FetchScript(url, maxRetries)
+    maxRetries = maxRetries or 3
+    for attempt = 1, maxRetries do
+        if httpRequest then
+            local reqOk, res = pcall(function()
+                return httpRequest({ Url = url, Method = "GET" })
+            end)
+            if reqOk and res and res.Body and #res.Body > 50 then
+                return res.Body
+            end
+        end
+        local ok, result = pcall(function()
+            return game:HttpGet(url, true)
+        end)
+        if ok and result and #result > 50 then
+            return result
+        end
+        task.wait(0.3)
+    end
+    return nil
+end
+
+-- Universal Safe Fluent UI Loader (Patched for Solara Level 3 capability & Delta Mobile)
+local FluentRaw = FetchScript("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/releases/latest/download/main.lua")
+    or FetchScript("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/main.lua")
+    or FetchScript("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua")
+
+if not FluentRaw then
+    warn("[Street Hub] Failed to load Fluent UI library.")
+    return
+end
+
+local FluentPatched = FluentRaw
+    :gsub("game:GetService%'CoreGui%'", "game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui')")
+    :gsub('game:GetService%("CoreGui"%)', "game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui')")
+    :gsub("protectgui", "dummy_protectgui")
+    :gsub("protect_gui", "dummy_protect_gui")
+
+local Fluent = nil
+local okFluent, resFluent = pcall(function()
+    return loadstring(FluentPatched)()
+end)
+if okFluent and resFluent then
+    Fluent = resFluent
+else
+    Fluent = loadstring(FluentRaw)()
+end
+
+local SaveManager = nil
+pcall(function()
+    local smRaw = FetchScript("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua")
+    if smRaw then SaveManager = loadstring(smRaw)() end
+end)
+local InterfaceManager = nil
+pcall(function()
+    local imRaw = FetchScript("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua")
+    if imRaw then InterfaceManager = loadstring(imRaw)() end
+end)
+
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -16,7 +104,6 @@ local TweenService = game:GetService("TweenService")
 local Lighting = game:GetService("Lighting")
 local VirtualUser = game:GetService("VirtualUser")
 
-local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 ----------------------------------------------------------------------
@@ -60,23 +147,153 @@ do
     end)
 end
 
--- Clean up any previous window instance
+-- Clean up any previous window instance & toggle
 if getgenv()._StreetHubWindow then
     pcall(function() getgenv()._StreetHubWindow:Destroy() end)
     getgenv()._StreetHubWindow = nil
+end
+pcall(function()
+    local safeP = GetSafeGuiParent()
+    local oldToggle = safeP and safeP:FindFirstChild("StreetHubWarZToggle")
+    if oldToggle then oldToggle:Destroy() end
+end)
+
+-- Mobile / Touch responsive window dimensions
+local isMobile = UserInputService.TouchEnabled and not (UserInputService.KeyboardEnabled and UserInputService.MouseEnabled)
+local vpSize = Camera and Camera.ViewportSize or Vector2.new(800, 600)
+local winWidth = 620
+local winHeight = 500
+local tabWidth = 160
+
+if isMobile or vpSize.X < 700 then
+    winWidth = math.clamp(math.floor(vpSize.X * 0.92), 310, 520)
+    winHeight = math.clamp(math.floor(vpSize.Y * 0.86), 260, 420)
+    tabWidth = math.clamp(math.floor(winWidth * 0.28), 95, 125)
 end
 
 -- Window Initialization
 local Window = Fluent:CreateWindow({
     Title = "Street Hub",
     SubTitle = "WarZPVP OPEN BETA",
-    TabWidth = 160,
-    Size = UDim2.fromOffset(640, 520),
+    TabWidth = tabWidth,
+    Size = UDim2.fromOffset(winWidth, winHeight),
     Acrylic = false,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
 })
 getgenv()._StreetHubWindow = Window
+
+if Fluent.GUI then
+    Fluent.GUI.ResetOnSpawn = false
+    pcall(function()
+        Fluent.GUI.Parent = GetSafeGuiParent()
+    end)
+end
+
+-- Floating Draggable Toggle Button for Mobile Touch & PC Mouse
+pcall(function()
+    local toggleGui = Instance.new("ScreenGui")
+    toggleGui.Name = "StreetHubWarZToggle"
+    toggleGui.ResetOnSpawn = false
+    toggleGui.DisplayOrder = 9999
+    toggleGui.Parent = GetSafeGuiParent()
+
+    local btn = Instance.new("TextButton")
+    btn.Name = "ToggleButton"
+    btn.Size = isMobile and UDim2.new(0, 115, 0, 36) or UDim2.new(0, 110, 0, 34)
+    btn.Position = isMobile and UDim2.new(0.02, 0, 0.22, 0) or UDim2.new(0.02, 0, 0.40, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
+    btn.BorderSizePixel = 0
+    btn.AutoButtonColor = false
+    btn.Text = ""
+    btn.Active = true
+    btn.Parent = toggleGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(235, 38, 52)
+    stroke.Thickness = 1.5
+    stroke.Parent = btn
+
+    local label = Instance.new("TextLabel")
+    label.Name = "BtnLabel"
+    label.Size = UDim2.new(1, -24, 1, 0)
+    label.Position = UDim2.new(0, 8, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamBold
+    label.Text = "STREET HUB"
+    label.TextColor3 = Color3.fromRGB(245, 245, 250)
+    label.TextSize = 12
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = btn
+
+    local dot = Instance.new("Frame")
+    dot.Name = "StatusDot"
+    dot.Size = UDim2.new(0, 8, 0, 8)
+    dot.Position = UDim2.new(1, -14, 0.5, -4)
+    dot.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+    dot.BorderSizePixel = 0
+    dot.Parent = btn
+
+    local dotCorner = Instance.new("UICorner")
+    dotCorner.CornerRadius = UDim.new(1, 0)
+    dotCorner.Parent = dot
+
+    -- Smooth Dragging Logic for Touch & Mouse
+    local dragging = false
+    local dragInput, dragStart, startPos
+    local hasMoved = false
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            hasMoved = false
+            dragStart = input.Position
+            startPos = btn.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    btn.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
+                hasMoved = true
+            end
+            btn.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    btn.Activated:Connect(function()
+        if not hasMoved then
+            if Window.Root then
+                Window.Root.Visible = not Window.Root.Visible
+                dot.BackgroundColor3 = Window.Root.Visible and Color3.fromRGB(46, 204, 113) or Color3.fromRGB(231, 76, 60)
+            elseif Fluent.GUI then
+                Fluent.GUI.Enabled = not Fluent.GUI.Enabled
+                dot.BackgroundColor3 = Fluent.GUI.Enabled and Color3.fromRGB(46, 204, 113) or Color3.fromRGB(231, 76, 60)
+            end
+        end
+    end)
+end)
 
 local Tabs = {
     Combat   = Window:AddTab({ Title = "Combat", Icon = "crosshair" }),
@@ -1504,11 +1721,7 @@ do
     local espFolder = Instance.new("Folder")
     espFolder.Name = "WarZ_ESP_Holder"
     pcall(function()
-        if gethui then
-            espFolder.Parent = gethui()
-        else
-            espFolder.Parent = game:GetService("CoreGui")
-        end
+        espFolder.Parent = GetSafeGuiParent()
     end)
 
     local function createPlayerESP(player)
