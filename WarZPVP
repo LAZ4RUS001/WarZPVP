@@ -1,0 +1,2341 @@
+--[[
+    Street Hub
+    Integrated for WarZPVP OPEN BETA
+]]
+
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local VirtualUser = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+----------------------------------------------------------------------
+-- Background Silent Anti-AFK (No UI, No Reconnect Needed)
+----------------------------------------------------------------------
+do
+    -- 1. Disable Roblox default 20-minute idle kick connection
+    pcall(function()
+        if typeof(getconnections) == "function" then
+            for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+                if conn.Disable then
+                    conn:Disable()
+                elseif conn.Disconnect then
+                    conn:Disconnect()
+                end
+            end
+        end
+    end)
+
+    -- 2. React to Idled event immediately by simulating user interaction
+    LocalPlayer.Idled:Connect(function()
+        pcall(function()
+            if VirtualUser then
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.zero)
+            end
+        end)
+    end)
+
+    -- 3. Periodic background pulse every 90 seconds to reset Roblox activity timers
+    task.spawn(function()
+        while true do
+            task.wait(90)
+            pcall(function()
+                if VirtualUser then
+                    VirtualUser:CaptureController()
+                    VirtualUser:ClickButton2(Vector2.zero)
+                end
+            end)
+        end
+    end)
+end
+
+-- Clean up any previous window instance
+if getgenv()._StreetHubWindow then
+    pcall(function() getgenv()._StreetHubWindow:Destroy() end)
+    getgenv()._StreetHubWindow = nil
+end
+
+-- Window Initialization
+local Window = Fluent:CreateWindow({
+    Title = "Street Hub",
+    SubTitle = "WarZPVP OPEN BETA",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(640, 520),
+    Acrylic = false,
+    Theme = "Darker",
+    MinimizeKey = Enum.KeyCode.RightControl
+})
+getgenv()._StreetHubWindow = Window
+
+local Tabs = {
+    Combat   = Window:AddTab({ Title = "Combat", Icon = "crosshair" }),
+    Weapon   = Window:AddTab({ Title = "Weapon", Icon = "flame" }),
+    Survival = Window:AddTab({ Title = "Survival", Icon = "heart" }),
+    Visuals  = Window:AddTab({ Title = "Visuals (ESP)", Icon = "eye" }),
+    Movement = Window:AddTab({ Title = "Movement", Icon = "gauge" }),
+    AutoFarm = Window:AddTab({ Title = "Automation", Icon = "cpu" }),
+    World    = Window:AddTab({ Title = "World & Misc", Icon = "globe" }),
+    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+local Options = Fluent.Options
+
+----------------------------------------------------------------------
+-- Remotes & References
+----------------------------------------------------------------------
+local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
+local function getRemote(name)
+    if RemotesFolder then
+        return RemotesFolder:FindFirstChild(name)
+    end
+    return nil
+end
+
+local FireRequestRemote = getRemote("FireRequest")
+local PickupLootRemote = getRemote("PickupLoot")
+local UseItemRemote = getRemote("UseItem")
+local BagAllToStashRemote = getRemote("BagAllToStash")
+local BagToStashRemote = getRemote("BagToStash")
+local StashToBagRemote = getRemote("StashToBag")
+local FishingStartRemote = getRemote("FishingStart")
+local FishingReelRemote = getRemote("FishingReel")
+local FishingStateRemote = getRemote("FishingState")
+local SwitchWeaponRequestRemote = getRemote("SwitchWeaponRequest")
+local SwapBagSlotRemote = getRemote("SwapBagSlot")
+
+local ConfigModule
+pcall(function()
+    ConfigModule = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+end)
+
+local InventoryModule
+pcall(function()
+    InventoryModule = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Inventory"))
+end)
+
+local FishingCompatModule
+pcall(function()
+    FishingCompatModule = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("FishingCompatibility"))
+end)
+
+local CombatSettingsModule
+pcall(function()
+    CombatSettingsModule = require(LocalPlayer.PlayerScripts.Client.input.CombatSettings)
+end)
+
+local PlayerStanceModule
+pcall(function()
+    PlayerStanceModule = require(LocalPlayer.PlayerScripts.Client.input.PlayerStance)
+end)
+
+local FishingModule
+pcall(function()
+    FishingModule = require(LocalPlayer.PlayerScripts.Client.world.Fishing)
+end)
+
+local WarzCameraModule
+pcall(function()
+    WarzCameraModule = require(LocalPlayer.PlayerScripts.Client.world.WarzCamera)
+end)
+
+local WarzSpreadModule
+pcall(function()
+    WarzSpreadModule = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("WarzSpread"))
+end)
+
+local WarzHitboxesModule
+pcall(function()
+    WarzHitboxesModule = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("warz"):WaitForChild("WarzHitboxes"))
+end)
+
+----------------------------------------------------------------------
+-- 1. COMBAT TAB
+----------------------------------------------------------------------
+do
+    pcall(function()
+        RunService:UnbindFromRenderStep("WarZ_Precision_Aim")
+    end)
+    if getgenv()._WarzCombatConn then
+        pcall(function() getgenv()._WarzCombatConn:Disconnect() end)
+        getgenv()._WarzCombatConn = nil
+    end
+
+    Tabs.Combat:AddSection("Silent Aim (กระสุนล็อคเป้า 100%)")
+
+    local SilentAimToggle = Tabs.Combat:AddToggle("SilentAimToggle", {
+        Title = "Silent Aim (100% Hit Rate)",
+        Description = "แก้ทิศทางกระสุนให้เข้าเป้า 100% แม้ไม่ได้หันจอตรง",
+        Default = true
+    })
+
+    local SilentAimTargetDropdown = Tabs.Combat:AddDropdown("SilentAimTargetDropdown", {
+        Title = "ตำแหน่งกระสุน Silent Aim",
+        Values = {"Head (จุดแดงตรงหัว - แนะนำ 100% เข้าเป้า)", "Same as Aimbot (ตามเป้าที่เลือก)", "Neck (ล็อคคอ)", "Upper Torso (ล็อคหน้าอก)"},
+        Default = "Head (จุดแดงตรงหัว - แนะนำ 100% เข้าเป้า)"
+    })
+
+    Tabs.Combat:AddSection("Camera Aimbot (ล็อคหน้าจอ)")
+
+    local AimbotToggle = Tabs.Combat:AddToggle("AimbotToggle", {
+        Title = "Camera Aimbot",
+        Description = "หันกล้องติดตามเป้าหมายทันทีแบบ Real-time",
+        Default = true
+    })
+
+    local AimTargetPartDropdown = Tabs.Combat:AddDropdown("AimTargetPart", {
+        Title = "ตำแหน่งล็อคเป้า (Target Part)",
+        Values = {"Head (จุดแดงตรงหัว - แนะนำ 100% เข้าเป้า)", "Neck (ล็อคคอ)", "Upper Torso (ล็อคหน้าอก)"},
+        Default = "Head (จุดแดงตรงหัว - แนะนำ 100% เข้าเป้า)"
+    })
+
+    local LockTriggerDropdown = Tabs.Combat:AddDropdown("LockTrigger", {
+        Title = "ปุ่มสั่งล็อคเป้า (Lock Trigger)",
+        Values = {"Hold Right Click (คลิกขวา)", "Hold Left Click (คลิกซ้าย)", "Always Auto (ล็อคตลอดเวลา)"},
+        Default = "Hold Right Click (คลิกขวา)"
+    })
+
+    local AimPriorityDropdown = Tabs.Combat:AddDropdown("AimPriority", {
+        Title = "จัดลำดับเป้าหมาย (Target Priority)",
+        Values = {"Closest to Crosshair (ใกล้เป้าเล็งสุด)", "Lowest Health (เลือดน้อยสุด)", "Closest Distance (ระยะใกล้สุด)"},
+        Default = "Closest to Crosshair (ใกล้เป้าเล็งสุด)"
+    })
+
+    local AimSmoothSlider = Tabs.Combat:AddSlider("AimSmooth", {
+        Title = "Aim Smoothness (ความสมูท)",
+        Description = "1 = ล็อคทันที (Instant Snap), 2-10 = หน่วงเนียนตา",
+        Default = 1,
+        Min = 1,
+        Max = 10,
+        Rounding = 1
+    })
+
+    local AimPredictionToggle = Tabs.Combat:AddToggle("AimPrediction", {
+        Title = "Movement Prediction (ดักทางวิ่ง/กระโดด)",
+        Description = "ปิดไว้เพื่อให้กระสุนตรงเป้า 100% ไม่ยิงนำหน้าจนวืด",
+        Default = false
+    })
+
+    local WallCheckToggle = Tabs.Combat:AddToggle("WallCheck", {
+        Title = "Visible Check (เช็คกำแพง)",
+        Description = "ไม่ล็อคศัตรูที่อยู่หลังกำแพงหรือสิ่งกีดขวาง",
+        Default = false
+    })
+
+    Tabs.Combat:AddSection("Visual Target Helpers & FOV")
+
+    local ShowFovToggle = Tabs.Combat:AddToggle("ShowFov", {
+        Title = "Show FOV Circle (แสดงวงกลม FOV)",
+        Default = false
+    })
+
+    local FovCircleColor = Tabs.Combat:AddColorpicker("FovCircleColor", {
+        Title = "FOV Circle Color",
+        Default = Color3.fromRGB(0, 255, 120)
+    })
+
+    local AimFovSlider = Tabs.Combat:AddSlider("AimFov", {
+        Title = "FOV Radius (ระยะตรวจจับเป้า)",
+        Description = "รัศมีตรวจจับศัตรูรอบกึ่งกลางจอ",
+        Default = 250,
+        Min = 40,
+        Max = 800,
+        Rounding = 1
+    })
+
+    local ShowSnaplineToggle = Tabs.Combat:AddToggle("ShowSnapline", {
+        Title = "Target Snapline (เส้นโยงเป้าหมาย)",
+        Default = false
+    })
+
+    local NeckRedDotToggle = Tabs.Combat:AddToggle("NeckRedDotToggle", {
+        Title = "Head Red Dot Indicator (แสดงจุดแดงตรงหัว)",
+        Description = "สร้างจุดเล็งสีแดงตรงหัวศัตรู 100% แสดงผลทะลุกำแพง",
+        Default = true
+    })
+
+    local NeckRedDotColor = Tabs.Combat:AddColorpicker("NeckRedDotColor", {
+        Title = "Red Dot Color (สีจุดแดงตรงหัว)",
+        Default = Color3.fromRGB(255, 30, 30)
+    })
+
+    Tabs.Combat:AddSection("Hitbox Expansion (ขยายหัว)")
+
+    local HitboxExpanderToggle = Tabs.Combat:AddToggle("HitboxExpander", {
+        Title = "ขยายหัว (Hitbox Expander)",
+        Description = "ขยายขนาดหัวศัตรูเพื่อให้ยิงโดนง่ายขึ้น",
+        Default = false
+    })
+
+    local HitboxSizeSlider = Tabs.Combat:AddSlider("HitboxSize", {
+        Title = "Head Hitbox Size (Studs)",
+        Description = "ปรับขนาดหัวผู้เล่นอื่น",
+        Default = 3.5,
+        Min = 1.5,
+        Max = 8,
+        Rounding = 1
+    })
+
+    Tabs.Weapon:AddSection("Recoil & Spread (แรงดีดและการกระจาย)")
+
+    local NoRecoilToggle = Tabs.Weapon:AddToggle("NoRecoil", {
+        Title = "No Recoil (ลดแรงดีด / ปืนไม่เด้ง 100%)",
+        Description = "ตัดแรงดีดปืนทุกชนิด ยิงนิ่งสนิท",
+        Default = true
+    })
+
+    local NoSpreadToggle = Tabs.Weapon:AddToggle("NoSpread", {
+        Title = "No Spread (กระสุนตรงเป้า / ไม่กระจาย 100%)",
+        Description = "กระสุนพุ่งตรงจุดศูนย์กลาง ไม่กระจายออก",
+        Default = true
+    })
+
+    Tabs.Weapon:AddSection("Fire Rate (ความเร็วการยิง)")
+
+    local RapidFireToggle = Tabs.Weapon:AddToggle("RapidFire", {
+        Title = "Rapid Fire (ยิงรัวขึ้น)",
+        Description = "ลดระยะหน่วงระหว่างนัดให้อัตราการยิงเร็วขึ้น",
+        Default = false
+    })
+
+    local RapidIntervalSlider = Tabs.Weapon:AddSlider("RapidInterval", {
+        Title = "Fire Interval (Sec)",
+        Description = "กำหนดระยะหน่วงระหว่างนัด (0.065 = สูงสุดตาม Config)",
+        Default = 0.08,
+        Min = 0.065,
+        Max = 0.3,
+        Rounding = 3
+    })
+
+    -- Hook Weapon Settings (Interval, Recoil, Spread)
+    if CombatSettingsModule then
+        if CombatSettingsModule.IntervalFor then
+            getgenv()._WarzOrigIntervalFor = getgenv()._WarzOrigIntervalFor or CombatSettingsModule.IntervalFor
+            local origIntervalFor = getgenv()._WarzOrigIntervalFor
+            CombatSettingsModule.IntervalFor = function(...)
+                if RapidFireToggle and RapidFireToggle.Value then
+                    local interval = tonumber(RapidIntervalSlider.Value) or 0.08
+                    return math.max(0.065, interval)
+                end
+                return origIntervalFor(...)
+            end
+        end
+
+        if CombatSettingsModule.RecoilFor then
+            getgenv()._WarzOrigRecoilFor = getgenv()._WarzOrigRecoilFor or CombatSettingsModule.RecoilFor
+            local origRecoilFor = getgenv()._WarzOrigRecoilFor
+            CombatSettingsModule.RecoilFor = function(...)
+                if NoRecoilToggle and NoRecoilToggle.Value then
+                    return 0
+                end
+                return origRecoilFor(...)
+            end
+        end
+
+        if CombatSettingsModule.ViewRecoilFor then
+            getgenv()._WarzOrigViewRecoilFor = getgenv()._WarzOrigViewRecoilFor or CombatSettingsModule.ViewRecoilFor
+            local origViewRecoilFor = getgenv()._WarzOrigViewRecoilFor
+            CombatSettingsModule.ViewRecoilFor = function(...)
+                if NoRecoilToggle and NoRecoilToggle.Value then
+                    return 0
+                end
+                return origViewRecoilFor(...)
+            end
+        end
+    end
+
+    -- Hook Recoil & Spread Modules
+    if WarzCameraModule and WarzCameraModule.ApplyRecoil then
+        getgenv()._WarzOrigApplyRecoil = getgenv()._WarzOrigApplyRecoil or WarzCameraModule.ApplyRecoil
+        local origApplyRecoil = getgenv()._WarzOrigApplyRecoil
+        WarzCameraModule.ApplyRecoil = function(...)
+            if NoRecoilToggle and NoRecoilToggle.Value then
+                return
+            end
+            return origApplyRecoil(...)
+        end
+    end
+
+    if WarzSpreadModule then
+        getgenv()._WarzOrigApplySpread = getgenv()._WarzOrigApplySpread or WarzSpreadModule.ApplySpread
+        getgenv()._WarzOrigCalcSpread = getgenv()._WarzOrigCalcSpread or WarzSpreadModule.CalcSpread
+        local origApplySpread = getgenv()._WarzOrigApplySpread
+        local origCalcSpread = getgenv()._WarzOrigCalcSpread
+
+        WarzSpreadModule.ApplySpread = function(dir, spread, seed)
+            if NoSpreadToggle and NoSpreadToggle.Value then
+                if typeof(dir) == "Vector3" and dir.Magnitude >= 0.001 then
+                    return dir.Unit
+                end
+                return dir
+            end
+            return origApplySpread(dir, spread, seed)
+        end
+
+        WarzSpreadModule.CalcSpread = function(...)
+            if NoSpreadToggle and NoSpreadToggle.Value then
+                return 0
+            end
+            return origCalcSpread(...)
+        end
+    end
+
+    -- Track mouse buttons for trigger
+    local isRightDown = false
+    local isLeftDown = false
+    UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            isRightDown = true
+        elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+            isLeftDown = true
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            isRightDown = false
+        elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+            isLeftDown = false
+        end
+    end)
+
+    -- FOV Circle & Snapline Drawing
+    local fovCircle = nil
+    local snapLine = nil
+    if Drawing and Drawing.new then
+        pcall(function()
+            fovCircle = Drawing.new("Circle")
+            fovCircle.Thickness = 1.5
+            fovCircle.NumSides = 64
+            fovCircle.Radius = tonumber(AimFovSlider.Value) or 250
+            fovCircle.Filled = false
+            fovCircle.Visible = false
+            fovCircle.Color = FovCircleColor.Value
+
+            snapLine = Drawing.new("Line")
+            snapLine.Thickness = 1.5
+            snapLine.Color = Color3.fromRGB(255, 60, 60)
+            snapLine.Visible = false
+        end)
+    end
+
+    -- Clean up any leftover Red Dots from previous executions
+    local function removeAllRedDots()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj.Name == "WarZ_HeadRedDot" or obj.Name == "WarZ_NeckRedDot" or obj.Name == "WarZ_HeadRedDotGui" or obj.Name == "WarZ_NeckRedDotGui" then
+                pcall(function() obj:Destroy() end)
+            end
+        end
+    end
+    pcall(removeAllRedDots)
+
+    -- Dynamic Target Position Helper (Accurate Center Hitbox / Neck Red Dot)
+    local function getTargetPartPosition(character, partMode)
+        if not character then return nil, nil, nil end
+        partMode = partMode or tostring(AimTargetPartDropdown.Value)
+
+        local head = character:FindFirstChild("Head")
+        local upperTorso = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+
+        -- 1. HEAD / RED DOT (หัวผู้เล่น 100% - Hardware Locked to Exact Server Hitbox)
+        if partMode:find("Head") or partMode:find("หัว") or partMode:find("จุดแดง") or partMode:find("Dot") then
+            if WarzHitboxesModule and WarzHitboxesModule.DataAimPoints then
+                local pts = nil
+                pcall(function()
+                    pts = WarzHitboxesModule.DataAimPoints(character, {"Bip01_Head"})
+                end)
+                if pts and pts[1] and pts[1].Position then
+                    return pts[1].Position, head or upperTorso, Vector3.zero
+                end
+            end
+            if head and head:IsA("BasePart") then
+                return head.Position, head, Vector3.zero
+            elseif upperTorso and upperTorso:IsA("BasePart") then
+                local localOffset = Vector3.new(0, upperTorso.Size.Y * 0.5 + 0.6, 0)
+                return upperTorso.CFrame:PointToWorldSpace(localOffset), upperTorso, localOffset
+            end
+        end
+
+        -- 2. NECK (ล็อคคอ)
+        if partMode:find("Neck") or partMode:find("คอ") then
+            if WarzHitboxesModule and WarzHitboxesModule.DataAimPoints then
+                local pts = nil
+                pcall(function()
+                    pts = WarzHitboxesModule.DataAimPoints(character, {"Bip01_Neck"})
+                end)
+                if pts and pts[1] and pts[1].Position then
+                    return pts[1].Position, head or upperTorso, Vector3.zero
+                end
+            end
+            if upperTorso and upperTorso:IsA("BasePart") then
+                local neckAtt = upperTorso:FindFirstChild("NeckRigAttachment") or upperTorso:FindFirstChild("NeckAttachment")
+                if neckAtt and neckAtt:IsA("Attachment") then
+                    return neckAtt.WorldPosition, upperTorso, neckAtt.Position
+                end
+                local localOffset = Vector3.new(0, upperTorso.Size.Y * 0.45, 0)
+                return upperTorso.CFrame:PointToWorldSpace(localOffset), upperTorso, localOffset
+            elseif head and head:IsA("BasePart") then
+                local localOffset = Vector3.new(0, -head.Size.Y * 0.45, 0)
+                return head.CFrame:PointToWorldSpace(localOffset), head, localOffset
+            end
+        end
+
+        -- 3. UPPER TORSO / CHEST (ลำตัว)
+        if WarzHitboxesModule and WarzHitboxesModule.DataAimPoints then
+            local pts = nil
+            pcall(function()
+                pts = WarzHitboxesModule.DataAimPoints(character, {"Bip01_Spine1"})
+            end)
+            if pts and pts[1] and pts[1].Position then
+                return pts[1].Position, upperTorso or head, Vector3.zero
+            end
+        end
+
+        if upperTorso and upperTorso:IsA("BasePart") then
+            return upperTorso.Position, upperTorso, Vector3.zero
+        end
+
+        if head and head:IsA("BasePart") then
+            return head.Position, head, Vector3.zero
+        end
+
+        return nil, nil, nil
+    end
+
+    local function isCharacterAlive(char)
+        if not char or not char.Parent then return false end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local isDead = char:GetAttribute("WarzDead") == true or (hum and hum.Health <= 0)
+        return not isDead
+    end
+
+    -- Velocity Prediction (Tightly clamped to avoid overshooting or flying above head)
+    local function applyPrediction(targetPos, targetChar)
+        if not (AimPredictionToggle and AimPredictionToggle.Value) or not targetChar then
+            return targetPos
+        end
+        local root = targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("Torso")
+        if root and root:IsA("BasePart") then
+            local vel = root.AssemblyLinearVelocity or root.Velocity
+            if vel and vel.Magnitude > 2 then
+                -- Ignore vertical velocity so jumping NEVER shifts bullets above head
+                local horizVel = Vector3.new(vel.X, 0, vel.Z)
+                local dist = (Camera.CFrame.Position - targetPos).Magnitude
+                local timeToTarget = math.clamp(dist / 3500, 0, 0.015)
+                return targetPos + (horizVel * timeToTarget)
+            end
+        end
+        return targetPos
+    end
+
+    -- Raycast Wall / Visibility Check (Properly ignores local player TPS visuals)
+    local function isTargetVisible(targetPos, targetChar)
+        if not (WallCheckToggle and WallCheckToggle.Value) then return true end
+        local origin = Camera.CFrame.Position
+        local dir = targetPos - origin
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+        local ignoreList = {Camera}
+        if LocalPlayer.Character then
+            table.insert(ignoreList, LocalPlayer.Character)
+        end
+        local heroVisuals = workspace:FindFirstChild("HeroVisualsLocal")
+        if heroVisuals then
+            table.insert(ignoreList, heroVisuals)
+        end
+        local warzFx = workspace:FindFirstChild("WarzFx")
+        if warzFx then
+            table.insert(ignoreList, warzFx)
+        end
+        rayParams.FilterDescendantsInstances = ignoreList
+        rayParams.IgnoreWater = true
+
+        local result = workspace:Raycast(origin, dir, rayParams)
+        if not result then return true end
+        if result.Instance and result.Instance:IsDescendantOf(targetChar) then
+            return true
+        end
+        return false
+    end
+
+    -- Best Target Selector with Priority Sorting
+    local function getBestTarget()
+        local mousePos = UserInputService:GetMouseLocation()
+        local maxFov = tonumber(AimFovSlider.Value) or 250
+        local myPos = Camera.CFrame.Position
+        local priorityMode = tostring(AimPriorityDropdown.Value)
+
+        local bestScore = math.huge
+        local bestPos = nil
+        local bestPart = nil
+        local bestChar = nil
+
+        local function checkChar(char, isDead)
+            if not char or isDead or not isCharacterAlive(char) then return end
+
+            local rawPos, adornee = getTargetPartPosition(char)
+            if not rawPos then return end
+
+            local screenPos, onScreen = Camera:WorldToViewportPoint(rawPos)
+            if not (onScreen and screenPos.Z > 0) then return end
+
+            local mouseDist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+            if mouseDist > maxFov then return end
+
+            if not isTargetVisible(rawPos, char) then return end
+
+            local score = mouseDist
+            if priorityMode:find("Health") or priorityMode:find("เลือด") then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local hp = hum and hum.Health or 100
+                score = hp + (mouseDist * 0.15)
+            elseif priorityMode:find("Distance") or priorityMode:find("ระยะ") then
+                local worldDist = (myPos - rawPos).Magnitude
+                score = worldDist + (mouseDist * 0.1)
+            end
+
+            if score < bestScore then
+                bestScore = score
+                bestPos = rawPos
+                bestPart = adornee
+                bestChar = char
+            end
+        end
+
+        -- 1. Players
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                checkChar(player.Character, player:GetAttribute("CSGO_Dead") == true or player:GetAttribute("WarzDead") == true)
+            end
+        end
+
+        -- 2. Dummies / Targets / Zombies
+        for _, containerName in ipairs({"WarzDummies", "Targets", "Zombies"}) do
+            local container = workspace:FindFirstChild(containerName)
+            if container then
+                for _, obj in ipairs(container:GetChildren()) do
+                    checkChar(obj, false)
+                end
+            end
+        end
+
+        return bestPos, bestPart, bestChar
+    end
+
+    -- Active Target Cache
+    local lockedTargetChar = nil
+
+    -- Target for Firing (Silent Aim & Redirection)
+    local function getTargetForShot()
+        local partMode = tostring(SilentAimTargetDropdown.Value)
+        if partMode:find("Same") or partMode:find("ตาม") then
+            partMode = tostring(AimTargetPartDropdown.Value)
+        end
+
+        if lockedTargetChar and isCharacterAlive(lockedTargetChar) then
+            local pos, part = getTargetPartPosition(lockedTargetChar, partMode)
+            if pos and isTargetVisible(pos, lockedTargetChar) then
+                return pos, part, lockedTargetChar
+            end
+        end
+
+        local pos, part, char = getBestTarget()
+        if char then
+            local customPos, customPart = getTargetPartPosition(char, partMode)
+            if customPos then
+                return customPos, customPart, char
+            end
+        end
+        return pos, part, char
+    end
+
+    -- Smart Water Cast Point Detector (Fixes "There is an obstruction at the swing point")
+    local function GetValidWaterCastPoint()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local head = char and char:FindFirstChild("Head") or root
+        local cam = Workspace.CurrentCamera
+        if not (root and cam) then return nil end
+
+        local origin = cam.CFrame.Position
+        local look = cam.CFrame.LookVector
+
+        local rParams = RaycastParams.new()
+        rParams.FilterType = Enum.RaycastFilterType.Exclude
+        rParams.FilterDescendantsInstances = { char }
+        rParams.IgnoreWater = false
+
+        -- 1. Direct camera view
+        local hit = Workspace:Raycast(origin, look * 90, rParams)
+        if hit and hit.Material == Enum.Material.Water then
+            local obsParams = RaycastParams.new()
+            obsParams.FilterType = Enum.RaycastFilterType.Exclude
+            obsParams.FilterDescendantsInstances = { char }
+            obsParams.IgnoreWater = true
+            local obs = Workspace:Raycast(head.Position, hit.Position - head.Position, obsParams)
+            if not obs or (obs.Position - hit.Position).Magnitude < 1.0 then
+                return hit.Position + Vector3.new(0, 0.1, 0)
+            end
+        end
+
+        -- 2. Fan sweep in front of player
+        local angles = { 0, 10, -10, 20, -20, 30, -30, 45, -45 }
+        local pitches = { -15, -25, -35, -45, -10 }
+
+        for _, pitch in ipairs(pitches) do
+            for _, yaw in ipairs(angles) do
+                local dir = (CFrame.Angles(0, math.rad(yaw), 0) * root.CFrame.LookVector)
+                local rayDir = (Vector3.new(dir.X, math.sin(math.rad(pitch)), dir.Z)).Unit * 60
+
+                local sweepHit = Workspace:Raycast(head.Position, rayDir, rParams)
+                if sweepHit and sweepHit.Material == Enum.Material.Water then
+                    local obsParams = RaycastParams.new()
+                    obsParams.FilterType = Enum.RaycastFilterType.Exclude
+                    obsParams.FilterDescendantsInstances = { char }
+                    obsParams.IgnoreWater = true
+
+                    local obsHit = Workspace:Raycast(head.Position, sweepHit.Position - head.Position, obsParams)
+                    if not obsHit or (obsHit.Position - sweepHit.Position).Magnitude < 1.0 then
+                        return sweepHit.Position + Vector3.new(0, 0.1, 0)
+                    end
+                end
+            end
+        end
+
+        -- 3. Downward raycast fallback across front
+        for dist = 10, 35, 5 do
+            local fwd = root.CFrame.LookVector
+            local topPos = root.Position + fwd * dist + Vector3.new(0, 10, 0)
+            local downHit = Workspace:Raycast(topPos, Vector3.new(0, -30, 0), rParams)
+            if downHit and downHit.Material == Enum.Material.Water then
+                local obsParams = RaycastParams.new()
+                obsParams.FilterType = Enum.RaycastFilterType.Exclude
+                obsParams.FilterDescendantsInstances = { char }
+                obsParams.IgnoreWater = true
+                local obs = Workspace:Raycast(head.Position, downHit.Position - head.Position, obsParams)
+                if not obs or (obs.Position - downHit.Position).Magnitude < 1.0 then
+                    return downHit.Position + Vector3.new(0, 0.1, 0)
+                end
+            end
+        end
+
+        return nil
+    end
+    getgenv()._WarzGetValidWaterCastPoint = GetValidWaterCastPoint
+
+    -- Hook Silent Aim & FishingStart Obstruction Bypass
+    local function hookSilentAim()
+        local function redirectShot(args)
+            if not (SilentAimToggle and SilentAimToggle.Value) then
+                return false
+            end
+            local success, targetPos = pcall(getTargetForShot)
+            if not success or not targetPos or typeof(targetPos) ~= "Vector3" then
+                return false
+            end
+
+            local camPos = (typeof(args[4]) == "Vector3" and args[4]) or Camera.CFrame.Position
+            local barrelPos = (typeof(args[5]) == "Vector3" and args[5]) or nil
+
+            -- Use barrel origin if available to completely kill TPS camera parallax
+            local shotOrigin = barrelPos or camPos
+            local diff = targetPos - shotOrigin
+            if diff.Magnitude >= 0.05 then
+                local directLook = diff.Unit
+                args[1] = directLook
+
+                -- 1. Zero spread seed (eliminates random deviation on server)
+                args[2] = 0
+
+                -- 2. Force fireStance into clean pinpoint zero-spread state
+                if typeof(args[3]) == "table" then
+                    args[3].currentSpread = 0
+                    args[3].finishedAiming = true
+                    args[3].inScope = true
+                    args[3].quickScope = true
+                    args[3].onGround = true
+                    args[3].jumping = false
+                    args[3].running = false
+                    local pitch = math.asin(math.clamp(directLook.Y, -1, 1))
+                    local yaw = math.atan2(-directLook.X, -directLook.Z)
+                    args[3].pitch = pitch
+                    args[3].yaw = yaw
+                end
+
+                -- 3. Synchronize camera origin to barrel position so camera raycast also hits target exactly
+                if barrelPos then
+                    args[4] = barrelPos
+                end
+
+                return true
+            end
+            return false
+        end
+
+        getgenv()._WarzRedirectShot = redirectShot
+
+        if not getgenv()._WarzSilentAimHooked then
+            getgenv()._WarzSilentAimHooked = true
+
+            if typeof(hookmetamethod) == "function" then
+                local origNamecall
+                origNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                    local method = getnamecallmethod()
+                    if (method == "FireServer" or method == "fireServer") and (self == FireRequestRemote or (self and self.Name == "FireRequest" and self:IsA("RemoteEvent"))) then
+                        local args = table.pack(...)
+                        if getgenv()._WarzRedirectShot then
+                            pcall(getgenv()._WarzRedirectShot, args)
+                        end
+                        return origNamecall(self, table.unpack(args, 1, args.n))
+                    end
+
+                    -- Fix FishingStart Obstruction: replace buried ground cast point with water surface
+                    if (method == "FireServer" or method == "fireServer") and (self == FishingStartRemote or (self and self.Name == "FishingStart" and self:IsA("RemoteEvent"))) then
+                        local args = table.pack(...)
+                        local validPoint = GetValidWaterCastPoint()
+                        if validPoint then
+                            args[3] = validPoint
+                        end
+                        if type(FishingModule) == "table" and FishingModule.Press then
+                            local ups = getupvalues(FishingModule.Press)
+                            local sendCast = ups[7]
+                            if type(sendCast) == "function" then
+                                pcall(setupvalue, sendCast, 10, validPoint or args[3])
+                            end
+                        end
+                        local directSuccess, directRet = pcall(self.FireServer, self, table.unpack(args, 1, args.n))
+                        if directSuccess then
+                            return directRet
+                        end
+                        setnamecallmethod(method)
+                        return origNamecall(self, table.unpack(args, 1, args.n))
+                    end
+
+                    return origNamecall(self, ...)
+                end))
+            elseif typeof(hookfunction) == "function" and FireRequestRemote and FireRequestRemote.FireServer then
+                local origFireServer
+                origFireServer = hookfunction(FireRequestRemote.FireServer, newcclosure(function(self, ...)
+                    local args = table.pack(...)
+                    if (self == FireRequestRemote or (self and self.Name == "FireRequest")) and getgenv()._WarzRedirectShot then
+                        pcall(getgenv()._WarzRedirectShot, args)
+                    end
+                    return origFireServer(self, table.unpack(args, 1, args.n))
+                end))
+            end
+
+            if typeof(hookfunction) == "function" and FishingStartRemote and FishingStartRemote.FireServer then
+                local origFishingStart
+                origFishingStart = hookfunction(FishingStartRemote.FireServer, newcclosure(function(self, ...)
+                    local args = table.pack(...)
+                    if (self == FishingStartRemote or (self and self.Name == "FishingStart")) then
+                        local validPoint = GetValidWaterCastPoint()
+                        if validPoint then
+                            args[3] = validPoint
+                        end
+                    end
+                    return origFishingStart(self, table.unpack(args, 1, args.n))
+                end))
+            end
+        end
+    end
+    pcall(hookSilentAim)
+
+    -- Hitbox Expander state
+    local lastHitboxState = false
+    local function resetAllHitboxes()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local head = player.Character:FindFirstChild("Head")
+                if head and head:IsA("BasePart") then
+                    head.Size = Vector3.new(1.15, 1.15, 1.15)
+                    head.Transparency = 0
+                end
+            end
+        end
+        for _, containerName in ipairs({"WarzDummies", "Targets", "Zombies"}) do
+            local container = workspace:FindFirstChild(containerName)
+            if container then
+                for _, obj in ipairs(container:GetChildren()) do
+                    local head = obj:FindFirstChild("Head")
+                    if head and head:IsA("BasePart") then
+                        head.Size = Vector3.new(1.15, 1.15, 1.15)
+                        head.Transparency = 0
+                    end
+                end
+            end
+        end
+    end
+
+    HitboxExpanderToggle:OnChanged(function(val)
+        if not val then
+            resetAllHitboxes()
+        end
+    end)
+
+    -- Real-time Camera Aim Engine
+    local function updateCameraAim()
+        if not (AimbotToggle and AimbotToggle.Value) then
+            lockedTargetChar = nil
+            return
+        end
+
+        local isTriggerActive = false
+        local triggerMode = tostring(LockTriggerDropdown.Value)
+        if triggerMode:find("Always") or triggerMode:find("ตลอด") then
+            isTriggerActive = true
+        elseif triggerMode:find("Right") or triggerMode:find("ขวา") then
+            isTriggerActive = isRightDown or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        else
+            isTriggerActive = isLeftDown or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+        end
+
+        if not isTriggerActive then
+            lockedTargetChar = nil
+            return
+        end
+
+        local targetRawPos = nil
+        if lockedTargetChar and isCharacterAlive(lockedTargetChar) then
+            local pos = getTargetPartPosition(lockedTargetChar)
+            if pos and isTargetVisible(pos, lockedTargetChar) then
+                targetRawPos = pos
+            end
+        end
+
+        if not targetRawPos then
+            local pos, _, char = getBestTarget()
+            targetRawPos = pos
+            lockedTargetChar = char
+        end
+
+        if not targetRawPos then
+            return
+        end
+
+        local aimTargetPos = applyPrediction(targetRawPos, lockedTargetChar)
+        local currentCF = Camera.CFrame
+        local targetCF = CFrame.lookAt(currentCF.Position, aimTargetPos)
+
+        local smooth = math.max(1, tonumber(AimSmoothSlider.Value) or 1)
+        local newCF = (smooth <= 1) and targetCF or currentCF:Lerp(targetCF, 1 / smooth)
+        Camera.CFrame = newCF
+
+        local look = newCF.LookVector
+        local targetYaw = math.atan2(-look.X, -look.Z)
+        local targetPitch = math.asin(math.clamp(look.Y, -1, 1))
+
+        if WarzCameraModule then
+            pcall(function()
+                debug.setupvalue(WarzCameraModule.GetYaw, 1, targetYaw)
+                debug.setupvalue(WarzCameraModule.GetPitch, 1, targetPitch)
+            end)
+        end
+
+        pcall(function()
+            LocalPlayer:SetAttribute("CSGO_Pitch", targetPitch)
+            LocalPlayer:SetAttribute("CSGO_Yaw", targetYaw)
+        end)
+    end
+
+    -- Run at Priority 1999 (Last.Value - 1) to override camera right after WarzCamera step (Priority 1998)
+    RunService:BindToRenderStep("WarZ_Precision_Aim", Enum.RenderPriority.Last.Value - 1, updateCameraAim)
+
+    -- Combat Loop
+    if getgenv()._WarzCombatConn then
+        pcall(function() getgenv()._WarzCombatConn:Disconnect() end)
+        getgenv()._WarzCombatConn = nil
+    end
+    getgenv()._WarzCombatConn = RunService.RenderStepped:Connect(function()
+        local mousePos = UserInputService:GetMouseLocation()
+
+        -- FOV Circle Update
+        if fovCircle then
+            fovCircle.Visible = (AimbotToggle.Value or SilentAimToggle.Value) and ShowFovToggle.Value
+            fovCircle.Radius = tonumber(AimFovSlider.Value) or 250
+            fovCircle.Color = FovCircleColor.Value
+            fovCircle.Position = mousePos
+        end
+
+        -- Snapline Update
+        if snapLine then
+            if ShowSnaplineToggle.Value and lockedTargetChar and isCharacterAlive(lockedTargetChar) then
+                local rawPos = getTargetPartPosition(lockedTargetChar)
+                if rawPos then
+                    local sPos, onScreen = Camera:WorldToViewportPoint(rawPos)
+                    if onScreen and sPos.Z > 0 then
+                        local vp = Camera.ViewportSize
+                        snapLine.From = Vector2.new(vp.X / 2, vp.Y)
+                        snapLine.To = Vector2.new(sPos.X, sPos.Y)
+                        snapLine.Visible = true
+                    else
+                        snapLine.Visible = false
+                    end
+                else
+                    snapLine.Visible = false
+                end
+            else
+                snapLine.Visible = false
+            end
+        end
+
+        -- Render Neck Red Dots on Enemies & Targets
+        local showNeckDots = (NeckRedDotToggle and NeckRedDotToggle.Value == true)
+        local dotColor = (NeckRedDotColor and NeckRedDotColor.Value) or Color3.fromRGB(255, 30, 30)
+
+        local function cleanupPartDots(part)
+            if not part then return end
+            for _, name in ipairs({"WarZ_HeadRedDot", "WarZ_NeckRedDot", "WarZ_HeadRedDotGui", "WarZ_NeckRedDotGui"}) do
+                local d = part:FindFirstChild(name)
+                if d then pcall(function() d:Destroy() end) end
+            end
+        end
+
+        local function updateNeckDot(character, isDead)
+            if not character then return end
+            local head = character:FindFirstChild("Head")
+            local ut = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+
+            -- Clean up any dots attached to torso or root part so they NEVER linger on neck/chest
+            cleanupPartDots(ut)
+            cleanupPartDots(hrp)
+
+            if not showNeckDots or isDead or not isCharacterAlive(character) then
+                cleanupPartDots(head)
+                return
+            end
+
+            local adornee = (head and head:IsA("BasePart")) and head or ut
+            if adornee and adornee:IsDescendantOf(workspace) then
+                local offset = (adornee == head) and Vector3.zero or Vector3.new(0, adornee.Size.Y * 0.5 + 0.6, 0)
+
+                -- 1. 3D Adornment Sphere (Hardware-locked directly to Head bone in C++)
+                local sp = adornee:FindFirstChild("WarZ_HeadRedDot")
+                if not sp then
+                    sp = Instance.new("SphereHandleAdornment")
+                    sp.Name = "WarZ_HeadRedDot"
+                    sp.Radius = 0.4
+                    sp.AlwaysOnTop = true
+                    sp.ZIndex = 10
+                    sp.Adornee = adornee
+                    sp.CFrame = CFrame.new(offset)
+                    sp.Color3 = dotColor
+                    sp.Transparency = 0
+                    sp.Parent = adornee
+                else
+                    if sp.Adornee ~= adornee then sp.Adornee = adornee end
+                    if sp.CFrame.Position ~= offset then sp.CFrame = CFrame.new(offset) end
+                    if sp.Color3 ~= dotColor then sp.Color3 = dotColor end
+                    if sp.Radius ~= 0.4 then sp.Radius = 0.4 end
+                end
+
+                -- 2. 2D Billboard Indicator (Hardware-locked to Head bone, 0ms delay, visible from any range)
+                local bg = adornee:FindFirstChild("WarZ_HeadRedDotGui")
+                if not bg then
+                    bg = Instance.new("BillboardGui")
+                    bg.Name = "WarZ_HeadRedDotGui"
+                    bg.Adornee = adornee
+                    bg.StudsOffset = offset
+                    bg.Size = UDim2.fromOffset(8, 8)
+                    bg.AlwaysOnTop = true
+
+                    local fr = Instance.new("Frame")
+                    fr.Name = "Dot"
+                    fr.Size = UDim2.fromScale(1, 1)
+                    fr.BorderSizePixel = 0
+                    fr.BackgroundColor3 = dotColor
+
+                    local uc = Instance.new("UICorner")
+                    uc.CornerRadius = UDim.new(1, 0)
+                    uc.Parent = fr
+
+                    local st = Instance.new("UIStroke")
+                    st.Name = "Stroke"
+                    st.Color = Color3.new(1, 1, 1)
+                    st.Thickness = 1
+                    st.Parent = fr
+
+                    fr.Parent = bg
+                    bg.Parent = adornee
+                else
+                    if bg.Adornee ~= adornee then bg.Adornee = adornee end
+                    if bg.StudsOffset ~= offset then bg.StudsOffset = offset end
+                    local fr = bg:FindFirstChild("Dot")
+                    if fr and fr.BackgroundColor3 ~= dotColor then
+                        fr.BackgroundColor3 = dotColor
+                    end
+                end
+            end
+        end
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                updateNeckDot(player.Character, player:GetAttribute("CSGO_Dead") == true or player:GetAttribute("WarzDead") == true)
+            end
+        end
+
+        for _, containerName in ipairs({"WarzDummies", "Targets", "Zombies"}) do
+            local container = workspace:FindFirstChild(containerName)
+            if container then
+                for _, obj in ipairs(container:GetChildren()) do
+                    updateNeckDot(obj, false)
+                end
+            end
+        end
+
+
+        -- Hitbox Expander
+        if HitboxExpanderToggle.Value then
+            lastHitboxState = true
+            local hSize = tonumber(HitboxSizeSlider.Value) or 3.5
+            for _, player in ipairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer and player.Character then
+                    local head = player.Character:FindFirstChild("Head")
+                    if head and head:IsA("BasePart") then
+                        head.Size = Vector3.new(hSize, hSize, hSize)
+                        head.Transparency = 0.5
+                        head.CanCollide = false
+                        head.CanQuery = true
+                        head.Massless = true
+                    end
+                end
+            end
+            for _, containerName in ipairs({"WarzDummies", "Targets", "Zombies"}) do
+                local container = workspace:FindFirstChild(containerName)
+                if container then
+                    for _, obj in ipairs(container:GetChildren()) do
+                        local head = obj:FindFirstChild("Head")
+                        if head and head:IsA("BasePart") then
+                            head.Size = Vector3.new(hSize, hSize, hSize)
+                            head.Transparency = 0.5
+                            head.CanCollide = false
+                            head.CanQuery = true
+                            head.Massless = true
+                        end
+                    end
+                end
+            end
+        elseif lastHitboxState then
+            lastHitboxState = false
+            resetAllHitboxes()
+        end
+    end)
+
+    ----------------------------------------------------------------------
+    -- 3. SURVIVAL (AUTO HEAL) TAB
+    ----------------------------------------------------------------------
+    Tabs.Survival:AddSection("Auto Heal Engine (ระบบปั้มยาอัตโนมัติ)")
+
+    local AutoHealToggle = Tabs.Survival:AddToggle("AutoHeal", {
+        Title = "Auto Heal (เปิดใช้งานปั้มยาออโต้)",
+        Description = "ตรวจจับเลือดแบบ Real-time และกดปั้มยาทันทีเมื่อเลือดลด",
+        Default = false
+    })
+
+    local AutoHealHpSlider = Tabs.Survival:AddSlider("AutoHealHp", {
+        Title = "Health Threshold (% เลือดที่เริ่มปั้ม)",
+        Description = "เริ่มปั้มยาเมื่อพลังชีวิตลดลงต่ำกว่าหรือเท่ากับ % นี้",
+        Default = 75,
+        Min = 20,
+        Max = 95,
+        Rounding = 1
+    })
+
+    local AutoHealPriorityDropdown = Tabs.Survival:AddDropdown("AutoHealPriority", {
+        Title = "Heal Priority (ลำดับความสำคัญของยา)",
+        Values = {"Smart (ฉลาดเลือกตามเลือดที่ขาด)", "Medkit First (ใช้กล่องพยาบาลก่อน)", "Bandages First (ใช้ผ้าพันแผลก่อน)", "Any Available (เจออะไรใช้ทันที)"},
+        Default = "Smart (ฉลาดเลือกตามเลือดที่ขาด)"
+    })
+
+    Tabs.Survival:AddSection("Inventory & Restock (จัดการช่องด่วนและกระเป๋า)")
+
+    local AutoRestockToggle = Tabs.Survival:AddToggle("AutoRestock", {
+        Title = "Auto Restock From Bag (ดึงยาลงช่อง 3-6)",
+        Description = "หากช่องด่วน 3-6 ยาหมด จะดึงยาจากกระเป๋าหลักมาใส่ช่อง 3 ให้อัตโนมัติ",
+        Default = true
+    })
+
+    local AutoSwitchSlot1Toggle = Tabs.Survival:AddToggle("AutoSwitchSlot1", {
+        Title = "Auto Switch to Slot 1 (สลับกลับปืนหลักทันที)",
+        Description = "เมื่อส่งคำสั่งปั้มยา จะสลับกลับมาถือปืนหลัก (ช่อง 1) ทันทีแบบ Instant 0ms ไม่มีคูลดาวน์",
+        Default = true
+    })
+
+    local AutoHealNotifyToggle = Tabs.Survival:AddToggle("AutoHealNotify", {
+        Title = "Notify on Heal (แจ้งเตือนเมื่อปั้มยา)",
+        Description = "แสดงข้อความแจ้งเตือนเมื่อระบบปั้มยา",
+        Default = false
+    })
+
+    -- Authoritative Medical Item Engine & Caching
+    local cachedBackpack = nil
+    local lastHealTime = 0
+    local isRestocking = false
+
+    local function getLiveBackpack()
+        if cachedBackpack and cachedBackpack.Slots and #cachedBackpack.Slots >= 8 then
+            return cachedBackpack
+        end
+        for _, v in pairs(getgc(true)) do
+            if typeof(v) == "table" and rawget(v, "Backpack") and typeof(v.Backpack) == "table" and v.Backpack.Slots then
+                cachedBackpack = v.Backpack
+                return cachedBackpack
+            end
+        end
+        return nil
+    end
+
+    -- Extract medical items from both memory Backpack and Quickslots UI
+    local function getAvailableMeds()
+        local meds = {}
+
+        -- Method 1: Check memory backpack quickslots (slots 3..6)
+        local bp = getLiveBackpack()
+        if bp and bp.Slots then
+            for slot = 3, 6 do
+                local slotData = bp.Slots[slot]
+                if slotData and slotData.ItemId ~= "" and (tonumber(slotData.Qty) or 0) > 0 then
+                    local id = slotData.ItemId
+                    local itemInfo = ConfigModule and ConfigModule.ShopItem and ConfigModule.ShopItem(id)
+                    local isMed = (itemInfo and itemInfo.Kind == "Medical") or id:find("Bandage") or id:find("Medkit")
+                    if isMed then
+                        table.insert(meds, {
+                            Slot = slot,
+                            ItemId = id,
+                            Name = itemInfo and itemInfo.Name or id,
+                            Qty = tonumber(slotData.Qty) or 1,
+                            HealAmount = (itemInfo and tonumber(itemInfo.HealAmount)) or (id:find("Medkit") and 100 or 45)
+                        })
+                    end
+                end
+            end
+        end
+
+        -- Method 2: Fallback to reading Quickslots GUI directly
+        if #meds == 0 then
+            pcall(function()
+                local gui = LocalPlayer:FindFirstChild("PlayerGui")
+                local bagHud = gui and gui:FindFirstChild("CSGO_UI") and gui.CSGO_UI:FindFirstChild("Root") and gui.CSGO_UI.Root:FindFirstChild("BagHud")
+                local qs = bagHud and bagHud:FindFirstChild("WarzPauseStage") and bagHud.WarzPauseStage:FindFirstChild("Frame") and bagHud.WarzPauseStage.Frame:FindFirstChild("Loadout") and bagHud.WarzPauseStage.Frame.Loadout:FindFirstChild("Quickslots")
+                if qs then
+                    local slotIdx = 3
+                    for _, btn in ipairs(qs:GetChildren()) do
+                        if btn:IsA("GuiObject") then
+                            local nameLbl = btn:FindFirstChild("ItemName", true)
+                            local qtyLbl = btn:FindFirstChild("Quantity", true) or btn:FindFirstChild("Qty", true)
+                            local itemName = nameLbl and nameLbl.Text or ""
+                            local qty = tonumber(qtyLbl and qtyLbl.Text:match("%d+")) or 1
+                            if itemName ~= "" and qty > 0 then
+                                local resolvedId = nil
+                                if itemName:find("Bandages DX") or itemName == "Bandages DX" then
+                                    resolvedId = "BandagesDX"
+                                elseif itemName:find("Bandages") or itemName == "Bandages" then
+                                    resolvedId = "Bandages"
+                                elseif itemName:find("Medkit") or itemName == "Medkit" then
+                                    resolvedId = "Medkit"
+                                elseif ConfigModule and ConfigModule.ShopItem then
+                                    local itemInfo = ConfigModule.ShopItem(itemName)
+                                    if itemInfo and itemInfo.Kind == "Medical" then
+                                        resolvedId = itemInfo.Id
+                                    end
+                                end
+
+                                if resolvedId then
+                                    table.insert(meds, {
+                                        Slot = slotIdx,
+                                        ItemId = resolvedId,
+                                        Name = itemName,
+                                        Qty = qty,
+                                        HealAmount = resolvedId:find("Medkit") and 100 or 45
+                                    })
+                                end
+                            end
+                            slotIdx = slotIdx + 1
+                        end
+                    end
+                end
+            end)
+        end
+
+        -- Method 3: Default active fallback for Deathmatch if slots are obscured
+        if #meds == 0 then
+            table.insert(meds, { Slot = 3, ItemId = "BandagesDX", Name = "Bandages DX", Qty = 1, HealAmount = 45 })
+            table.insert(meds, { Slot = 4, ItemId = "Medkit", Name = "Medkit", Qty = 1, HealAmount = 100 })
+        end
+
+        return meds
+    end
+
+    -- Core Auto Heal Execution (Thread-Safe & Anti-Spam)
+    local function executeAutoHeal(triggerSource)
+        if not AutoHealToggle.Value or not UseItemRemote then return end
+
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum and hum.Health > 0) then return end
+        if char:GetAttribute("WarzDead") == true or LocalPlayer:GetAttribute("CSGO_Dead") == true then return end
+
+        local hp = hum.Health
+        local maxHp = hum.MaxHealth > 0 and hum.MaxHealth or 100
+        local hpPct = (hp / maxHp) * 100
+        local threshold = tonumber(AutoHealHpSlider.Value) or 75
+
+        if hpPct > threshold then return end
+
+        -- Fast Throttle (0.05s) to prevent single-tick micro loops while allowing instant continuous healing
+        local now = os.clock()
+        if (now - lastHealTime) < 0.05 then
+            return
+        end
+
+        local availableMeds = getAvailableMeds()
+        local targetMed = nil
+        local priorityMode = tostring(AutoHealPriorityDropdown.Value)
+        local missingHp = maxHp - hp
+
+        if #availableMeds > 0 then
+            if priorityMode:find("Smart") or priorityMode:find("ฉลาด") then
+                if missingHp >= 50 then
+                    for _, m in ipairs(availableMeds) do
+                        if m.ItemId == "Medkit" or m.HealAmount >= 80 then
+                            targetMed = m
+                            break
+                        end
+                    end
+                end
+                if not targetMed then
+                    for _, m in ipairs(availableMeds) do
+                        if m.ItemId:find("Bandage") then
+                            targetMed = m
+                            break
+                        end
+                    end
+                end
+                targetMed = targetMed or availableMeds[1]
+            elseif priorityMode:find("Medkit") then
+                for _, m in ipairs(availableMeds) do
+                    if m.ItemId:find("Medkit") or m.HealAmount >= 80 then
+                        targetMed = m
+                        break
+                    end
+                end
+                targetMed = targetMed or availableMeds[1]
+            elseif priorityMode:find("Bandages") then
+                for _, m in ipairs(availableMeds) do
+                    if m.ItemId:find("Bandage") then
+                        targetMed = m
+                        break
+                    end
+                end
+                targetMed = targetMed or availableMeds[1]
+            else
+                targetMed = availableMeds[1]
+            end
+        end
+
+        if targetMed then
+            lastHealTime = os.clock()
+            UseItemRemote:FireServer(targetMed.Slot, targetMed.ItemId)
+
+            -- Instant Cooldown Bypass / Reset on Client Attributes
+            pcall(function()
+                LocalPlayer:SetAttribute("WarzMedCooldownUntil", 0)
+                LocalPlayer:SetAttribute("WarzMedCdLeft", 0)
+            end)
+
+            if AutoHealNotifyToggle.Value then
+                Fluent:Notify({
+                    Title = "Auto Heal",
+                    Content = string.format("ปั้มยา: %s (เลือดเหลือ %d%%)", targetMed.Name, math.floor(hpPct)),
+                    Duration = 2
+                })
+            end
+
+            -- Instant Switch back to Slot 1 (Primary Gun) - 0ms immediate execution, no delay
+            if AutoSwitchSlot1Toggle and AutoSwitchSlot1Toggle.Value then
+                local switchRemote = SwitchWeaponRequestRemote or (RemotesFolder and RemotesFolder:FindFirstChild("SwitchWeaponRequest"))
+                if switchRemote then
+                    switchRemote:FireServer(1)
+                    task.defer(function()
+                        if switchRemote then
+                            switchRemote:FireServer(1)
+                        end
+                    end)
+                    task.delay(0.04, function()
+                        if switchRemote then
+                            switchRemote:FireServer(1)
+                        end
+                    end)
+                end
+            end
+        elseif AutoRestockToggle.Value and SwapBagSlotRemote and not isRestocking then
+            -- Auto Restock: Move medical item from bag (slots 9+) to quickslot 3
+            local bp = getLiveBackpack()
+            if bp and bp.Slots then
+                local foundBagSlot = nil
+                for s = 9, #bp.Slots do
+                    local slotData = bp.Slots[s]
+                    if slotData and slotData.ItemId ~= "" and (tonumber(slotData.Qty) or 0) > 0 then
+                        local itemInfo = ConfigModule and ConfigModule.ShopItem and ConfigModule.ShopItem(slotData.ItemId)
+                        local isMed = (itemInfo and itemInfo.Kind == "Medical") or slotData.ItemId:find("Bandage") or slotData.ItemId:find("Medkit")
+                        if isMed then
+                            foundBagSlot = s
+                            break
+                        end
+                    end
+                end
+
+                if foundBagSlot then
+                    isRestocking = true
+                    SwapBagSlotRemote:FireServer(foundBagSlot, 3)
+                    task.delay(0.25, function()
+                        isRestocking = false
+                        cachedBackpack = nil
+                    end)
+                end
+            end
+        end
+    end
+
+    -- 1. Reactive Hook: React immediately within 0ms when health decreases
+    local healthConn = nil
+    local function hookCharacterHealth(char)
+        if healthConn then
+            healthConn:Disconnect()
+            healthConn = nil
+        end
+        if not char then return end
+        local hum = char:WaitForChild("Humanoid", 5)
+        if hum then
+            healthConn = hum.HealthChanged:Connect(function(newHp)
+                if AutoHealToggle.Value and newHp > 0 then
+                    executeAutoHeal("HealthChanged")
+                end
+            end)
+        end
+    end
+
+    if LocalPlayer.Character then
+        hookCharacterHealth(LocalPlayer.Character)
+    end
+    LocalPlayer.CharacterAdded:Connect(function(char)
+        cachedBackpack = nil
+        hookCharacterHealth(char)
+    end)
+
+    -- 2. Polling Loop: Constant fallback check every 0.05s (rapid tick damage recovery)
+    task.spawn(function()
+        while true do
+            task.wait(0.05)
+            if AutoHealToggle.Value then
+                executeAutoHeal("Tick")
+            end
+        end
+    end)
+end
+
+----------------------------------------------------------------------
+-- 4. VISUALS (ESP) TAB
+----------------------------------------------------------------------
+do
+    Tabs.Visuals:AddSection("Player ESP (ผู้เล่น)")
+
+    local PlayerESPToggle = Tabs.Visuals:AddToggle("PlayerESP", {
+        Title = "Player Chams (มองทะลุตัวละคร)",
+        Description = "ไฮไลท์สีตัวผู้เล่นทะลุกำแพง",
+        Default = false
+    })
+
+    local ESPBoxColor = Tabs.Visuals:AddColorpicker("ESPColor", {
+        Title = "Chams Color (สี Chams)",
+        Default = Color3.fromRGB(255, 60, 60)
+    })
+
+    local ESPBox2DToggle = Tabs.Visuals:AddToggle("ESPBox2D", {
+        Title = "Player 2D Box (กรอบรอบตัว)",
+        Description = "แสดงกรอบสี่เหลี่ยม 2D ล้อมรอบตัวผู้เล่น",
+        Default = false
+    })
+
+    local ESPBox2DColor = Tabs.Visuals:AddColorpicker("ESPBox2DColor", {
+        Title = "Box Color (สีกรอบ)",
+        Default = Color3.fromRGB(255, 255, 255)
+    })
+
+    local ESPNamesToggle = Tabs.Visuals:AddToggle("ESPNames", {
+        Title = "Show Player Name & Distance",
+        Description = "แสดงชื่อผู้เล่นและระยะห่าง",
+        Default = true
+    })
+
+    Tabs.Visuals:AddSection("World & Entities (ไอเทมและมอนสเตอร์)")
+
+    local LootESPToggle = Tabs.Visuals:AddToggle("LootESP", {
+        Title = "Loot Item ESP (ไอเทมตกบนพื้น)",
+        Description = "แสดงตำแหน่งไอเทมและอาวุธที่ดรอปตามพื้น",
+        Default = false
+    })
+
+    local LootColor = Tabs.Visuals:AddColorpicker("LootColor", {
+        Title = "Loot Color (สีไอเทม)",
+        Default = Color3.fromRGB(0, 255, 140)
+    })
+
+    local BossESPToggle = Tabs.Visuals:AddToggle("BossESP", {
+        Title = "Boss & Zombie ESP",
+        Description = "แสดงตำแหน่งบอสและซอมบี้ในแผนที่",
+        Default = false
+    })
+
+    -- Storage for ESP Objects
+    local espFolder = Instance.new("Folder")
+    espFolder.Name = "WarZ_ESP_Holder"
+    pcall(function()
+        if gethui then
+            espFolder.Parent = gethui()
+        else
+            espFolder.Parent = game:GetService("CoreGui")
+        end
+    end)
+
+    local function createPlayerESP(player)
+        if player == LocalPlayer then return end
+
+        local function setupChar(char)
+            if not char then return end
+            local root = char:WaitForChild("HumanoidRootPart", 5)
+            local head = char:WaitForChild("Head", 5)
+            if not root or not head then return end
+
+            local highlight = Instance.new("Highlight")
+            highlight.Name = "ESPHighlight_" .. player.Name
+            highlight.FillColor = ESPBoxColor.Value
+            highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+            highlight.FillTransparency = 0.5
+            highlight.OutlineTransparency = 0.1
+            highlight.Adornee = char
+            highlight.Enabled = PlayerESPToggle.Value
+            highlight.Parent = espFolder
+
+            local bill = Instance.new("BillboardGui")
+            bill.Name = "ESPBill_" .. player.Name
+            bill.Adornee = head
+            bill.Size = UDim2.new(0, 160, 0, 44)
+            bill.StudsOffset = Vector3.new(0, 2.7, 0)
+            bill.AlwaysOnTop = true
+            bill.Enabled = PlayerESPToggle.Value and ESPNamesToggle.Value
+            bill.Parent = espFolder
+
+            local label = Instance.new("TextLabel")
+            label.Size = UDim2.new(1, 0, 0, 24)
+            label.BackgroundTransparency = 1
+            label.TextColor3 = Color3.fromRGB(255, 255, 255)
+            label.TextStrokeTransparency = 0
+            label.Font = Enum.Font.GothamBold
+            label.TextSize = 13
+            label.Text = player.DisplayName
+            label.Parent = bill
+
+            local barBg = Instance.new("Frame")
+            barBg.Name = "HealthBarBg"
+            barBg.Size = UDim2.new(0, 90, 0, 4)
+            barBg.Position = UDim2.new(0.5, -45, 0, 26)
+            barBg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+            barBg.BorderSizePixel = 0
+            barBg.Parent = bill
+
+            local barStroke = Instance.new("UIStroke")
+            barStroke.Color = Color3.fromRGB(0, 0, 0)
+            barStroke.Thickness = 1
+            barStroke.Parent = barBg
+
+            local barFill = Instance.new("Frame")
+            barFill.Name = "HealthBarFill"
+            barFill.Size = UDim2.new(1, 0, 1, 0)
+            barFill.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
+            barFill.BorderSizePixel = 0
+            barFill.Parent = barBg
+
+            -- Drawing 2D Box & Health Bar
+            local boxOutline = nil
+            local box = nil
+            local healthOutline = nil
+            local healthFill = nil
+            if Drawing and Drawing.new then
+                boxOutline = Drawing.new("Square")
+                boxOutline.Visible = false
+                boxOutline.Color = Color3.fromRGB(0, 0, 0)
+                boxOutline.Thickness = 3
+                boxOutline.Transparency = 1
+                boxOutline.Filled = false
+
+                box = Drawing.new("Square")
+                box.Visible = false
+                box.Color = ESPBox2DColor.Value
+                box.Thickness = 1.5
+                box.Transparency = 1
+                box.Filled = false
+
+                healthOutline = Drawing.new("Square")
+                healthOutline.Visible = false
+                healthOutline.Color = Color3.fromRGB(0, 0, 0)
+                healthOutline.Thickness = 1
+                healthOutline.Filled = true
+
+                healthFill = Drawing.new("Square")
+                healthFill.Visible = false
+                healthFill.Color = Color3.fromRGB(0, 255, 120)
+                healthFill.Thickness = 1
+                healthFill.Filled = true
+            end
+
+            local conn
+            conn = RunService.RenderStepped:Connect(function()
+                if not char or not char.Parent or not root.Parent then
+                    highlight:Destroy()
+                    bill:Destroy()
+                    if boxOutline then boxOutline:Remove() end
+                    if box then box:Remove() end
+                    if healthOutline then healthOutline:Remove() end
+                    if healthFill then healthFill:Remove() end
+                    conn:Disconnect()
+                    return
+                end
+
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local isDead = (hum and hum.Health <= 0) 
+                    or char:GetAttribute("WarzDead") == true 
+                    or player:GetAttribute("CSGO_Dead") == true 
+                    or char:GetAttribute("WarzStance") == "Dead"
+
+                if isDead then
+                    highlight.Enabled = false
+                    bill.Enabled = false
+                    if box then box.Visible = false end
+                    if boxOutline then boxOutline.Visible = false end
+                    if healthOutline then healthOutline.Visible = false end
+                    if healthFill then healthFill.Visible = false end
+                    return
+                end
+
+                highlight.Enabled = PlayerESPToggle.Value
+                highlight.FillColor = ESPBoxColor.Value
+                bill.Enabled = PlayerESPToggle.Value and ESPNamesToggle.Value
+
+                local hp = hum and math.clamp(hum.Health, 0, hum.MaxHealth) or 100
+                local maxHp = hum and (hum.MaxHealth > 0 and hum.MaxHealth or 100) or 100
+                local hpPercent = math.clamp(hp / maxHp, 0, 1)
+                local hpColor = Color3.fromHSV(hpPercent * 0.33, 1, 1)
+
+                local screenPos, onScreen = Camera:WorldToViewportPoint(root.Position)
+                if onScreen and ESPBox2DToggle.Value and box and boxOutline then
+                    local headPoint = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.6, 0))
+                    local legPoint = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 2.8, 0))
+                    local height = math.abs(headPoint.Y - legPoint.Y)
+                    local width = height * 0.62
+
+                    local boxPos = Vector2.new(screenPos.X - width / 2, headPoint.Y)
+                    local boxSize = Vector2.new(width, height)
+
+                    boxOutline.Size = boxSize
+                    boxOutline.Position = boxPos
+                    boxOutline.Visible = true
+
+                    box.Size = boxSize
+                    box.Position = boxPos
+                    box.Color = ESPBox2DColor.Value
+                    box.Visible = true
+
+                    if healthOutline and healthFill then
+                        local barWidth = 3
+                        local barX = boxPos.X - barWidth - 5
+                        local barY = boxPos.Y
+
+                        healthOutline.Size = Vector2.new(barWidth + 2, height + 2)
+                        healthOutline.Position = Vector2.new(barX - 1, barY - 1)
+                        healthOutline.Visible = true
+
+                        local fillH = math.max(1, height * hpPercent)
+                        healthFill.Size = Vector2.new(barWidth, fillH)
+                        healthFill.Position = Vector2.new(barX, barY + (height - fillH))
+                        healthFill.Color = hpColor
+                        healthFill.Visible = true
+                    end
+                else
+                    if box then box.Visible = false end
+                    if boxOutline then boxOutline.Visible = false end
+                    if healthOutline then healthOutline.Visible = false end
+                    if healthFill then healthFill.Visible = false end
+                end
+
+                if bill.Enabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    local dist = math.floor((LocalPlayer.Character.HumanoidRootPart.Position - root.Position).Magnitude)
+                    label.Text = string.format("%s [%dm]", player.DisplayName, dist)
+                    barFill.Size = UDim2.new(hpPercent, 0, 1, 0)
+                    barFill.BackgroundColor3 = hpColor
+                end
+            end)
+        end
+
+        if player.Character then
+            setupChar(player.Character)
+        end
+        player.CharacterAdded:Connect(setupChar)
+    end
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        createPlayerESP(p)
+    end
+    Players.PlayerAdded:Connect(createPlayerESP)
+
+    -- Loot ESP Routine
+    local activeLootBills = {}
+    task.spawn(function()
+        while true do
+            task.wait(1.5)
+            if LootESPToggle.Value then
+                local lootFolder = Workspace:FindFirstChild("WarzLoot")
+                if lootFolder then
+                    for _, item in ipairs(lootFolder:GetChildren()) do
+                        if not activeLootBills[item] and item:IsA("Model") or item:IsA("BasePart") then
+                            local part = item:IsA("BasePart") and item or item:FindFirstChildWhichIsA("BasePart")
+                            if part then
+                                local b = Instance.new("BillboardGui")
+                                b.Size = UDim2.new(0, 120, 0, 25)
+                                b.AlwaysOnTop = true
+                                b.Adornee = part
+                                b.Parent = espFolder
+
+                                local lbl = Instance.new("TextLabel")
+                                lbl.Size = UDim2.new(1, 0, 1, 0)
+                                lbl.BackgroundTransparency = 1
+                                lbl.TextColor3 = LootColor.Value
+                                lbl.TextStrokeTransparency = 0
+                                lbl.Font = Enum.Font.GothamMedium
+                                lbl.TextSize = 12
+                                lbl.Text = item.Name
+                                lbl.Parent = b
+
+                                activeLootBills[item] = b
+                            end
+                        end
+                    end
+                end
+            else
+                for item, bill in pairs(activeLootBills) do
+                    bill:Destroy()
+                end
+                table.clear(activeLootBills)
+            end
+        end
+    end)
+end
+
+----------------------------------------------------------------------
+-- 5. MOVEMENT TAB
+----------------------------------------------------------------------
+do
+    Tabs.Movement:AddSection("Speed & Jump (ความเร็วและแรงกระโดด)")
+
+    local SpeedToggle = Tabs.Movement:AddToggle("SpeedToggle", {
+        Title = "Enable Custom WalkSpeed",
+        Description = "เปิดใช้งานความเร็วเดินแบบกำหนดเอง",
+        Default = false
+    })
+
+    local SpeedSlider = Tabs.Movement:AddSlider("SpeedSlider", {
+        Title = "WalkSpeed Value",
+        Default = 24,
+        Min = 16,
+        Max = 80,
+        Rounding = 1
+    })
+
+    local JumpToggle = Tabs.Movement:AddToggle("JumpToggle", {
+        Title = "Enable Custom JumpPower",
+        Description = "เปิดใช้งานแรงกระโดดแบบกำหนดเอง",
+        Default = false
+    })
+
+    local JumpSlider = Tabs.Movement:AddSlider("JumpSlider", {
+        Title = "JumpPower Value",
+        Default = 50,
+        Min = 50,
+        Max = 150,
+        Rounding = 1
+    })
+
+    Tabs.Movement:AddSection("Mobility Utilities (เครื่องมือเสริมการเคลื่อนที่)")
+
+    local InfStaminaToggle = Tabs.Movement:AddToggle("InfStamina", {
+        Title = "Infinite Stamina (วิ่งไม่จำกัด)",
+        Description = "วิ่งได้ต่อเนื่อง สตามิน่าไม่ลด",
+        Default = false
+    })
+
+    local NoclipToggle = Tabs.Movement:AddToggle("Noclip", {
+        Title = "Noclip (เดินทะลุกำแพง)",
+        Description = "สามารถเดินทะลุสิ่งกีดขวางและกำแพงได้",
+        Default = false
+    })
+
+    -- Stamina & Stat Loops
+    RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                if SpeedToggle.Value then
+                    hum.WalkSpeed = tonumber(SpeedSlider.Value) or 24
+                end
+                if JumpToggle.Value then
+                    hum.JumpPower = tonumber(JumpSlider.Value) or 50
+                end
+            end
+
+            if NoclipToggle.Value then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") and part.CanCollide then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end
+
+        if InfStaminaToggle.Value and PlayerStanceModule then
+            pcall(function()
+                debug.setupvalue(PlayerStanceModule.Start or PlayerStanceModule.GetStamina, "u5", {
+                    stamina = 75,
+                    sprintPenalty = 0
+                })
+            end)
+        end
+    end)
+end
+
+----------------------------------------------------------------------
+-- 6. AUTOMATION TAB
+----------------------------------------------------------------------
+do
+    Tabs.AutoFarm:AddSection("Auto Looting (เก็บไอเทม & ฝากคลัง)")
+
+    local AutoPickupToggle = Tabs.AutoFarm:AddToggle("AutoPickup", {
+        Title = "Auto Pickup Loot (เก็บของรอบตัว)",
+        Description = "ดูดเก็บของที่ตกอยู่บนพื้นรอบตัวอัตโนมัติ",
+        Default = false
+    })
+
+    local PickupRadiusSlider = Tabs.AutoFarm:AddSlider("PickupRadius", {
+        Title = "Pickup Radius (ระยะดูดของ - Studs)",
+        Default = 20,
+        Min = 5,
+        Max = 40,
+        Rounding = 1
+    })
+
+    Tabs.AutoFarm:AddButton({
+        Title = "Deposit All to Stash (ย้ายของเข้าคลัง)",
+        Description = "ส่งกระเป๋าทั้งหมดเก็บเข้าตู้เซฟทันที",
+        Callback = function()
+            if BagAllToStashRemote then
+                BagAllToStashRemote:FireServer()
+                Fluent:Notify({
+                    Title = "Stash",
+                    Content = "ส่งคำสั่งเก็บของทั้งหมดเรียบร้อย",
+                    Duration = 3
+                })
+            end
+        end
+    })
+
+    Tabs.AutoFarm:AddSection("Auto Fishing (ตกปลาอัจฉริยะ 100%)")
+    local AutoFishToggle = Tabs.AutoFarm:AddToggle("AutoFish", {
+        Title = "Auto Fishing (ระบบตกปลาอัตโนมัติ)",
+        Description = "คำนวณจุดกึ่งกลางหลอดเขียว 100% สลับถือเบ็ดอัตโนมัติ ไม่หลุด ไม่ค้าง",
+        Default = false
+    })
+
+    -- Auto Pickup Thread
+    task.spawn(function()
+        while true do
+            task.wait(0.3)
+            if AutoPickupToggle.Value and PickupLootRemote then
+                local lootFolder = Workspace:FindFirstChild("WarzLoot")
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if lootFolder and root then
+                    for _, loot in ipairs(lootFolder:GetChildren()) do
+                        local part = loot:IsA("BasePart") and loot or loot:FindFirstChildWhichIsA("BasePart")
+                        if part then
+                            local dist = (root.Position - part.Position).Magnitude
+                            if dist <= (tonumber(PickupRadiusSlider.Value) or 20) then
+                                PickupLootRemote:FireServer(loot)
+                                task.wait(0.1)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Auto Fishing Helpers
+    local function GetFishingProfile()
+        local sessionData = nil
+        if type(FishingModule) == "table" and FishingModule.Press then
+            local ups = getupvalues(FishingModule.Press)
+            local sendCast = ups[7]
+            if type(sendCast) == "function" then
+                local sendCastUps = getupvalues(sendCast)
+                local getSession = sendCastUps[1]
+                if type(getSession) == "function" then
+                    pcall(function() sessionData = getSession() end)
+                end
+            end
+        end
+        if sessionData and sessionData.profile and sessionData.profile.Backpack then
+            return sessionData.profile
+        end
+        for _, v in pairs(getreg()) do
+            if type(v) == "table" and rawget(v, "Backpack") and rawget(v, "Account") then
+                return v
+            end
+        end
+        return nil
+    end
+
+    local function FindFishingRodAndBait(profile)
+        local rodSlot, rodId = nil, nil
+        local baitSlot, baitId, baitQty = nil, nil, 0
+
+        if profile and profile.Backpack and profile.Backpack.Slots then
+            local slots = profile.Backpack.Slots
+
+            -- ตรวจสอบช่องคีย์ลัด 1-6 ก่อน
+            for s = 1, 6 do
+                local it = slots[s]
+                if it and it.ItemId and it.ItemId ~= "" then
+                    local sItem = ConfigModule and ConfigModule.ShopItem and ConfigModule.ShopItem(it.ItemId)
+                    local kind = sItem and sItem.Kind
+                    if (kind and ConfigModule.IsFishingRodKind and ConfigModule.IsFishingRodKind(kind)) or tostring(it.ItemId):lower():find("rod") then
+                        rodSlot = s
+                        rodId = it.ItemId
+                        break
+                    end
+                end
+            end
+
+            -- ถ้าไม่เจอในช่องลัด ตรวจสอบในกระเป๋า (ช่อง 9 เป็นต้นไป)
+            if not rodSlot then
+                for s, it in pairs(slots) do
+                    local slotNum = tonumber(s) or 0
+                    if slotNum >= 9 and it and it.ItemId and it.ItemId ~= "" then
+                        local sItem = ConfigModule and ConfigModule.ShopItem and ConfigModule.ShopItem(it.ItemId)
+                        local kind = sItem and sItem.Kind
+                        if (kind and ConfigModule.IsFishingRodKind and ConfigModule.IsFishingRodKind(kind)) or tostring(it.ItemId):lower():find("rod") then
+                            rodSlot = slotNum
+                            rodId = it.ItemId
+                            break
+                        end
+                    end
+                end
+            end
+
+            -- ค้นหาเหยื่อที่รองรับ
+            if rodId then
+                for s, it in pairs(slots) do
+                    if it and it.ItemId and it.ItemId ~= "" and s ~= rodSlot then
+                        local sItem = ConfigModule and ConfigModule.ShopItem and ConfigModule.ShopItem(it.ItemId)
+                        local kind = sItem and sItem.Kind
+                        local isBait = (kind and ConfigModule.IsBaitKind and ConfigModule.IsBaitKind(kind)) or tostring(it.ItemId):lower():find("bait")
+                        if isBait and (not FishingCompatModule or not FishingCompatModule.Allows or FishingCompatModule.Allows(rodId, it.ItemId)) then
+                            baitSlot = s
+                            baitId = it.ItemId
+                            baitQty = tonumber(it.Qty or it.qty) or 1
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        if not rodSlot then
+            local catId = tostring(LocalPlayer:GetAttribute("CSGO_CatalogId") or "")
+            if catId:lower():find("rod") then
+                rodSlot = tonumber(LocalPlayer:GetAttribute("CSGO_ActiveSlot")) or 1
+                rodId = catId
+            end
+        end
+
+        return rodSlot, rodId, baitSlot, baitId, baitQty
+    end
+
+    local function EnsureRodEquipped(rodSlot, rodId)
+        if not rodSlot then return false end
+
+        -- ถ้าเบ็ดอยู่ในกระเป๋า ให้ย้ายมาที่ช่องลัด 3
+        if rodSlot >= 9 and SwapBagSlotRemote then
+            SwapBagSlotRemote:FireServer(rodSlot, 3)
+            task.wait(0.35)
+            rodSlot = 3
+        end
+
+        local activeSlot = tonumber(LocalPlayer:GetAttribute("CSGO_ActiveSlot")) or 0
+        if activeSlot ~= rodSlot and SwitchWeaponRequestRemote then
+            SwitchWeaponRequestRemote:FireServer(rodSlot)
+            local t0 = os.clock()
+            while os.clock() - t0 < 0.8 do
+                if tonumber(LocalPlayer:GetAttribute("CSGO_ActiveSlot")) == rodSlot then
+                    break
+                end
+                task.wait(0.05)
+            end
+        end
+
+        return tonumber(LocalPlayer:GetAttribute("CSGO_ActiveSlot")) == rodSlot
+    end
+
+    local function CalculateNextZoneHit(biteAt, speed, zoneCenter, now)
+        local uNow = (now - biteAt) * speed
+        local z = zoneCenter
+        local minU = uNow + 0.04 * speed
+
+        local bestU = nil
+        local kStart = math.floor(uNow / 2)
+        for k = kStart, kStart + 6 do
+            local u1 = 2 * k + z
+            if u1 >= minU and (bestU == nil or u1 < bestU) then
+                bestU = u1
+            end
+            local u2 = 2 * k + (2 - z)
+            if u2 >= minU and (bestU == nil or u2 < bestU) then
+                bestU = u2
+            end
+        end
+
+        if bestU then
+            return biteAt + (bestU / speed)
+        end
+        return now + 0.1
+    end
+
+    local function CastRod(rSlot, bSlot, bId)
+        local waterPoint = (getgenv()._WarzGetValidWaterCastPoint and getgenv()._WarzGetValidWaterCastPoint()) or (GetValidWaterCastPoint and GetValidWaterCastPoint())
+        if not waterPoint then
+            return false, "no_water"
+        end
+
+        if type(FishingModule) == "table" and FishingModule.Press then
+            local ups = getupvalues(FishingModule.Press)
+            local sendCast = ups[7]
+            if type(sendCast) == "function" then
+                pcall(setupvalue, sendCast, 10, waterPoint)
+                pcall(setupvalue, sendCast, 11, bId)
+                pcall(setupvalue, sendCast, 12, bSlot)
+            end
+        end
+
+        if FishingStartRemote then
+            FishingStartRemote:FireServer(rSlot, bSlot, waterPoint)
+            return true
+        else
+            pcall(function() FishingModule.Press() end)
+            return true
+        end
+    end
+
+    -- Auto Fishing State & Precision Reel Logic
+    local activeReelThread = nil
+    local lastResultTime = 0
+    local isCastingInProgress = false
+
+    if FishingStateRemote then
+        FishingStateRemote.OnClientEvent:Connect(function(state)
+            if not AutoFishToggle.Value or typeof(state) ~= "table" then return end
+
+            if state.phase == "cast" then
+                isCastingInProgress = true
+            elseif state.phase == "reel" then
+                isCastingInProgress = false
+                if activeReelThread then
+                    pcall(task.cancel, activeReelThread)
+                    activeReelThread = nil
+                end
+
+                activeReelThread = task.spawn(function()
+                    local biteAt = tonumber(state.biteAt) or Workspace:GetServerTimeNow()
+                    local speed = tonumber(state.speed) or 1
+                    local zoneCenter = tonumber(state.zoneCenter) or 0.5
+                    local zoneWidth = tonumber(state.zoneWidth) or 0.2
+                    local deadline = tonumber(state.deadline) or (Workspace:GetServerTimeNow() + 4)
+
+                    local function getMarkerPos(t)
+                        local v = (t - biteAt) * speed % 2
+                        if v < 0 then v = v + 2 end
+                        if v >= 1 then v = 2 - v end
+                        return v
+                    end
+
+                    local tNow = Workspace:GetServerTimeNow()
+                    local curPos = getMarkerPos(tNow)
+
+                    -- ถ้า Marker อยู่ในแถบเขียวอยู่แล้ว ให้ตวัดทันที
+                    if math.abs(curPos - zoneCenter) <= (zoneWidth / 2) * 0.75 then
+                        if FishingReelRemote then
+                            FishingReelRemote:FireServer(state.castId, tNow)
+                        end
+                        return
+                    end
+
+                    -- คำนวณหา Timestamp ที่จะเข้าสู่จุดกึ่งกลางแถบเขียว 100%
+                    local tHit = CalculateNextZoneHit(biteAt, speed, zoneCenter, tNow)
+                    if tHit > deadline - 0.05 then
+                        tHit = deadline - 0.08
+                    end
+
+                    local delta = tHit - Workspace:GetServerTimeNow()
+                    if delta > 0.05 then
+                        task.wait(delta - 0.02)
+                    end
+
+                    while Workspace:GetServerTimeNow() < tHit - 0.002 do
+                        RunService.Heartbeat:Wait()
+                    end
+
+                    if AutoFishToggle.Value and FishingReelRemote then
+                        local finalNow = Workspace:GetServerTimeNow()
+                        FishingReelRemote:FireServer(state.castId, finalNow)
+                    end
+                end)
+            elseif state.phase == "result" or state.phase == "cancel" or state.phase == "idle" then
+                isCastingInProgress = false
+                lastResultTime = Workspace:GetServerTimeNow()
+                if activeReelThread then
+                    pcall(task.cancel, activeReelThread)
+                    activeReelThread = nil
+                end
+
+                -- แจ้งเตือนเมื่อตกปลาสำเร็จ
+                if state.phase == "result" and state.ok and Fluent and Fluent.Notify then
+                    local rewardText = "ได้ของแล้ว!"
+                    if type(state.rewards) == "table" and #state.rewards > 0 then
+                        local items = {}
+                        for _, rw in ipairs(state.rewards) do
+                            table.insert(items, tostring(rw.name or rw.itemId or "Item") .. " x" .. tostring(rw.qty or 1))
+                        end
+                        rewardText = table.concat(items, ", ")
+                    elseif state.itemId then
+                        rewardText = tostring(state.name or state.itemId) .. " x" .. tostring(state.qty or 1)
+                    end
+                    Fluent:Notify({
+                        Title = "Auto Fishing (สำเร็จ)",
+                        Content = rewardText,
+                        Duration = 2
+                    })
+                end
+
+                -- หน่วงเวลารอ Animation รางวัลจบ (2.6 วินาที) แล้วเหวี่ยงต่ออย่างราบรื่น
+                task.delay(2.6, function()
+                    if not AutoFishToggle.Value then return end
+                    local isActive = false
+                    pcall(function()
+                        isActive = FishingModule and FishingModule.IsActive and FishingModule.IsActive()
+                    end)
+                    if not isActive and not isCastingInProgress then
+                        local prof = GetFishingProfile()
+                        local rSlot, rId, bSlot, bId, bQty = FindFishingRodAndBait(prof)
+                        if rSlot and EnsureRodEquipped(rSlot, rId) then
+                            if bQty and bQty <= 0 then
+                                Fluent:Notify({
+                                    Title = "Auto Fishing",
+                                    Content = "เหยื่อหมดแล้ว! กรุณาเติมเหยื่อ",
+                                    Duration = 3
+                                })
+                                return
+                            end
+                            CastRod(rSlot, bSlot, bId)
+                        end
+                    end
+                end)
+            end
+        end)
+    end
+
+
+    -- Auto Fishing Watchdog & Cast Loop
+    task.spawn(function()
+        local lastBaitWarning = 0
+        local castStartTime = 0
+
+        while true do
+            task.wait(1.2)
+            if AutoFishToggle.Value and FishingModule then
+                local isActive = false
+                pcall(function()
+                    isActive = FishingModule.IsActive and FishingModule.IsActive()
+                end)
+
+                if isActive then
+                    if castStartTime == 0 then
+                        castStartTime = os.clock()
+                    elseif os.clock() - castStartTime > 16 then
+                        -- Stuck watchdog: เหวี่ยงค้างเกิน 16 วินาที ให้ยกเลิกแล้วเหวี่ยงใหม่
+                        pcall(function()
+                            if FishingModule.Cancel then
+                                FishingModule.Cancel()
+                            end
+                        end)
+                        castStartTime = 0
+                        task.wait(1)
+                    end
+                else
+                    castStartTime = 0
+                    local timeSinceResult = Workspace:GetServerTimeNow() - lastResultTime
+                    if timeSinceResult >= 2.5 and not isCastingInProgress then
+                        local prof = GetFishingProfile()
+                        local rSlot, rId, bSlot, bId, bQty = FindFishingRodAndBait(prof)
+
+                        if not rSlot then
+                            if os.clock() - lastBaitWarning > 8 and Fluent and Fluent.Notify then
+                                lastBaitWarning = os.clock()
+                                Fluent:Notify({
+                                    Title = "Auto Fishing",
+                                    Content = "ไม่พบคันเบ็ดในกระเป๋า!",
+                                    Duration = 3
+                                })
+                            end
+                        elseif bSlot == nil or (bQty and bQty <= 0) then
+                            if os.clock() - lastBaitWarning > 8 and Fluent and Fluent.Notify then
+                                lastBaitWarning = os.clock()
+                                Fluent:Notify({
+                                    Title = "Auto Fishing",
+                                    Content = "เหยื่อตกปลาหมด! กรุณาใส่เหยื่อในกระเป๋า",
+                                    Duration = 3
+                                })
+                            end
+                        else
+                            local equipped = EnsureRodEquipped(rSlot, rId)
+                            if equipped then
+                                isCastingInProgress = true
+                                local ok, err = CastRod(rSlot, bSlot, bId)
+                                if not ok and err == "no_water" and os.clock() - lastBaitWarning > 8 and Fluent and Fluent.Notify then
+                                    lastBaitWarning = os.clock()
+                                    Fluent:Notify({
+                                        Title = "Auto Fishing",
+                                        Content = "ไม่พบผิวน้ำด้านหน้า กรุณายืนใกล้แหล่งน้ำ",
+                                        Duration = 3
+                                    })
+                                end
+                                task.wait(1)
+                                isCastingInProgress = false
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+end
+
+----------------------------------------------------------------------
+-- 7. WORLD & MISC TAB
+----------------------------------------------------------------------
+do
+    Tabs.World:AddSection("Environment (สภาพแวดล้อมและแสงสว่าง)")
+
+    local FullbrightToggle = Tabs.World:AddToggle("Fullbright", {
+        Title = "Fullbright (สว่างไม่มีมืด)",
+        Description = "ปรับแสงสว่างสูงสุดและลบหมอกในเกม",
+        Default = false
+    })
+
+    FullbrightToggle:OnChanged(function()
+        if FullbrightToggle.Value then
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 14
+            Lighting.FogEnd = 100000
+            Lighting.GlobalShadows = false
+            Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+        else
+            Lighting.Brightness = 1
+            Lighting.ClockTime = 12
+            Lighting.FogEnd = 1000
+            Lighting.GlobalShadows = true
+        end
+    end)
+
+    Tabs.World:AddSection("Server Utilities (เครื่องมือเซิร์ฟเวอร์)")
+
+    Tabs.World:AddButton({
+        Title = "Rejoin Server (เข้าเซิร์ฟเวอร์ใหม่)",
+        Description = "เชื่อมต่อเข้าเซิร์ฟเวอร์เดิมอีกครั้ง",
+        Callback = function()
+            local ts = game:GetService("TeleportService")
+            ts:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end
+    })
+
+    Tabs.World:AddButton({
+        Title = "Copy JobId & PlaceId",
+        Description = "คัดลอกรหัสเซิร์ฟเวอร์ลงคลิปบอร์ด",
+        Callback = function()
+            if setclipboard then
+                setclipboard(string.format("PlaceId: %d | JobId: %s", game.PlaceId, game.JobId))
+                Fluent:Notify({
+                    Title = "Copied",
+                    Content = "บันทึกรหัสเซิร์ฟเวอร์ลงคลิปบอร์ดแล้ว",
+                    Duration = 3
+                })
+            end
+        end
+    })
+end
+
+----------------------------------------------------------------------
+-- 8. SETTINGS TAB & CONFIG INITIALIZATION (PER-ACCOUNT)
+----------------------------------------------------------------------
+local accountId = tostring(LocalPlayer.UserId or 0)
+local accountName = tostring(LocalPlayer.Name or "Unknown")
+local accountFolder = string.format("Street_Hub/accounts/%s_%s", accountName, accountId)
+
+Tabs.Settings:AddSection("Account Profile (โปรไฟล์บัญชี)")
+
+Tabs.Settings:AddParagraph({
+    Title = "Account Configuration Profile",
+    Content = "การตั้งค่า, ธีม, และ Config ทั้งหมดถูกแยกตามบัญชีอัตโนมัติ (Per-Account Isolation)"
+})
+
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+
+InterfaceManager:SetFolder(accountFolder)
+SaveManager:SetFolder(accountFolder .. "/configs")
+
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+
+Window:SelectTab(1)
+
+Fluent:Notify({
+    Title = "Street Hub Loaded",
+    Content = "ยินดีต้อนรับ! สคริปต์พร้อมใช้งาน (กด Right Control เพื่อเปิด/ปิด)",
+    Duration = 6
+})
+
+SaveManager:LoadAutoloadConfig()
